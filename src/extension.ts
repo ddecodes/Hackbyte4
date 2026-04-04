@@ -12,6 +12,7 @@ import * as PDFDocument from 'pdfkit';
 import * as puppeteer from 'puppeteer';
 import * as YAML from 'yaml';
 import { validateGraphNodeChunk, GraphNodePayload } from './geminiGraphValidation';
+import { proposeYamlParseFix } from './yamlParseErrorFix';
 
 // Variable to hold reference to the Webview panel
 let currentPanel: vscode.WebviewPanel | undefined = undefined;
@@ -30,6 +31,33 @@ function maskApiKey(key: string): string {
     return `*** (${key.length} chars)`;
   }
   return `${key.slice(0, 4)}…${key.slice(-4)} (${key.length} chars)`;
+}
+
+/** Best-effort: jump to the line mentioned in a js-yaml / YAMLException message. */
+function revealYamlErrorInEditor(editor: vscode.TextEditor | undefined, errorMessage: string): void {
+  if (!editor) {
+    return;
+  }
+  const lc = /\((\d+):(\d+)\)/.exec(errorMessage);
+  const lm = /line\s+(\d+)/i.exec(errorMessage);
+  let line0 = -1;
+  if (lc) {
+    line0 = parseInt(lc[1], 10) - 1;
+  } else if (lm) {
+    line0 = parseInt(lm[1], 10) - 1;
+  }
+  if (line0 < 0 || line0 >= editor.document.lineCount) {
+    return;
+  }
+  const pos = new vscode.Position(line0, 0);
+  void vscode.window
+    .showTextDocument(editor.document, {
+      selection: new vscode.Range(pos, pos),
+      viewColumn: editor.viewColumn,
+    })
+    .then((ed) => {
+      ed.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    });
 }
 
 /** Webview postMessage deserializes JSON; `content` may already be an object (not a string). */
@@ -501,6 +529,127 @@ async function handleWebviewMessage(panel: vscode.WebviewPanel, message: any) {
       console.error('Error in webview:', message.message);
       vscode.window.showErrorMessage('YAML Preview error: ' + message.message);
       break;
+    case 'requestParseErrorFix': {
+      const requestId = Number((message as { requestId?: number }).requestId);
+      if (!Number.isFinite(requestId)) {
+        break;
+      }
+      const fixApiKey = String((message as { apiKey?: string }).apiKey ?? '').trim();
+      const fixYaml = String((message as { yamlContent?: string }).yamlContent ?? '');
+      const fixErr = String((message as { errorText?: string }).errorText ?? '');
+      if (!fixApiKey) {
+        sendMessageToWebview(panel, {
+          command: 'parseErrorFixFailed',
+          requestId,
+          error: 'Paste your Gemini API key below to use AI fix.',
+        });
+        break;
+      }
+      const fixConfig = vscode.workspace.getConfiguration('flowjam');
+      const fixModel = String(fixConfig.get<string>('geminiModel') ?? 'gemini-2.5-flash').trim();
+      const fixEditor = vscode.window.activeTextEditor || currentEditor;
+      const fileLabel =
+        fixEditor?.document.uri.fsPath ?? fixEditor?.document.fileName ?? 'open file';
+      flowjamOutput?.show(true);
+      flowjamLog(
+        `requestParseErrorFix requestId=${requestId} model=${fixModel} errLen=${fixErr.length} yamlLen=${fixYaml.length} key=${maskApiKey(fixApiKey)}`
+      );
+      void (async () => {
+        try {
+          const proposal = await proposeYamlParseFix(
+            fixApiKey,
+            fixModel,
+            fixErr,
+            fixYaml,
+            fileLabel,
+            flowjamLog
+          );
+          revealYamlErrorInEditor(fixEditor, fixErr);
+          sendMessageToWebview(panel, {
+            command: 'parseErrorFixReady',
+            requestId,
+            analysis: proposal.analysis,
+            changeSummary: proposal.changeSummary,
+            proposedYaml: proposal.proposedYaml,
+          });
+        } catch (e) {
+          const err = String(e);
+          flowjamLog(`parse error fix FAILED: ${err}`);
+          sendMessageToWebview(panel, {
+            command: 'parseErrorFixFailed',
+            requestId,
+            error: err,
+          });
+        }
+      })();
+      break;
+    }
+    case 'applyParseErrorFix': {
+      const fixContent = String((message as { content?: string }).content ?? '');
+      const summary = String((message as { changeSummary?: string }).changeSummary ?? '');
+      void (async () => {
+        const choice = await vscode.window.showInformationMessage(
+          'Apply the AI-proposed YAML fix to the open file?',
+          { modal: true, detail: summary.slice(0, 3000) },
+          'Apply',
+          'Cancel'
+        );
+        if (choice !== 'Apply') {
+          sendMessageToWebview(panel, { command: 'applyParseErrorFixCancelled' });
+          return;
+        }
+        const ed = vscode.window.activeTextEditor || currentEditor;
+        if (!ed || !fixContent) {
+          vscode.window.showErrorMessage('No active editor or empty proposal.');
+          sendMessageToWebview(panel, {
+            command: 'saveComplete',
+            success: false,
+            error: 'Cannot apply fix',
+          });
+          return;
+        }
+        if (ed.document.languageId !== 'yaml' && !ed.document.fileName.endsWith('.yml')) {
+          vscode.window.showErrorMessage('Active editor is not a YAML file.');
+          sendMessageToWebview(panel, {
+            command: 'saveComplete',
+            success: false,
+            error: 'Not a YAML file',
+          });
+          return;
+        }
+        const fullRange = new vscode.Range(
+          new vscode.Position(0, 0),
+          ed.document.lineAt(ed.document.lineCount - 1).range.end
+        );
+        ed.edit((editBuilder: vscode.TextEditorEdit) => {
+          editBuilder.replace(fullRange, fixContent);
+        }).then((success: boolean) => {
+          if (!success) {
+            vscode.window.showErrorMessage('Failed to replace file content.');
+            sendMessageToWebview(panel, {
+              command: 'saveComplete',
+              success: false,
+              error: 'Edit failed',
+            });
+            return;
+          }
+          ed.document.save().then(
+            () => {
+              sendMessageToWebview(panel, { command: 'saveComplete', success: true });
+            },
+            (saveErr) => {
+              vscode.window.showErrorMessage('Failed to save: ' + String(saveErr));
+              sendMessageToWebview(panel, {
+                command: 'saveComplete',
+                success: false,
+                error: String(saveErr),
+              });
+            }
+          );
+        });
+      })();
+      break;
+    }
     case 'validateGraphNodes': {
       const requestId = Number(message.requestId);
       if (!Number.isFinite(requestId)) {

@@ -52,6 +52,16 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
   const [isAiEnabled, setIsAiEnabled] = useState<boolean>(false);
   const validationRequestIdRef = useRef<number>(0);
 
+  // --- AI parse-error fix (YAML invalid: no graph/table) ---
+  const parseFixRequestIdRef = useRef<number>(0);
+  const [parseFixLoading, setParseFixLoading] = useState<boolean>(false);
+  const [parseFixProposal, setParseFixProposal] = useState<{
+    analysis: string;
+    changeSummary: string;
+    proposedYaml: string;
+  } | null>(null);
+  const [parseFixError, setParseFixError] = useState<string | null>(null);
+
   // Initialize API key from local storage
   useEffect(() => {
     const saved = localStorage.getItem('flowjam.geminiApiKey');
@@ -276,6 +286,27 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
           setNodeValidations({});
           setTimeout(() => setCommunicationStatus(null), 6000);
         }
+      } else if (message.command === 'parseErrorFixReady') {
+        const rid = Number(message.requestId);
+        if (rid === parseFixRequestIdRef.current) {
+          setParseFixLoading(false);
+          setParseFixError(null);
+          setParseFixProposal({
+            analysis: String(message.analysis ?? ''),
+            changeSummary: String(message.changeSummary ?? ''),
+            proposedYaml: String(message.proposedYaml ?? ''),
+          });
+        }
+      } else if (message.command === 'parseErrorFixFailed') {
+        const rid = Number(message.requestId);
+        if (rid === parseFixRequestIdRef.current) {
+          setParseFixLoading(false);
+          setParseFixProposal(null);
+          setParseFixError(String(message.error ?? 'Unknown error'));
+        }
+      } else if (message.command === 'applyParseErrorFixCancelled') {
+        setCommunicationStatus('Apply cancelled');
+        setTimeout(() => setCommunicationStatus(null), 2500);
       }
     };
 
@@ -513,6 +544,49 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
       command: 'highlightPath',
       path: path
     });
+  };
+
+  // Clear AI proposal when parse succeeds
+  useEffect(() => {
+    if (!error) {
+      setParseFixProposal(null);
+      setParseFixError(null);
+      setParseFixLoading(false);
+    }
+  }, [error]);
+
+  const handleRequestParseErrorFix = () => {
+    if (!error) return;
+    const key = geminiApiKey.trim();
+    if (!key) {
+      setParseFixError('Enter your Gemini API key below first.');
+      return;
+    }
+    const rid = ++parseFixRequestIdRef.current;
+    setParseFixLoading(true);
+    setParseFixError(null);
+    setParseFixProposal(null);
+    vscodeApi.postMessage({
+      command: 'requestParseErrorFix',
+      requestId: rid,
+      apiKey: key,
+      yamlContent: yamlContent,
+      errorText: error,
+    });
+  };
+
+  const handleApplyParseErrorFix = () => {
+    if (!parseFixProposal) return;
+    vscodeApi.postMessage({
+      command: 'applyParseErrorFix',
+      content: parseFixProposal.proposedYaml,
+      changeSummary: parseFixProposal.changeSummary,
+    });
+  };
+
+  const handleDismissParseFix = () => {
+    setParseFixProposal(null);
+    setParseFixError(null);
   };
 
   return (
@@ -863,6 +937,95 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
           }
           .ai-run-btn:hover { background-color: #4f46e5; }
           .ai-run-btn:disabled { opacity: 0.5; }
+          .parse-error-ai-panel {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color, rgba(128,128,128,0.35));
+          }
+          .parse-error-ai-panel h4 {
+            margin: 0 0 8px 0;
+            font-size: 13px;
+            font-weight: 600;
+          }
+          .parse-error-ai-panel .hint {
+            font-size: 11px;
+            opacity: 0.85;
+            margin: 0 0 8px 0;
+            line-height: 1.4;
+          }
+          .parse-error-ai-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 8px;
+          }
+          .parse-error-ai-key {
+            flex: 1;
+            min-width: 180px;
+            background: var(--background-color);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            padding: 8px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+          }
+          .parse-error-ai-btn {
+            background: #6366f1;
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: var(--vscode-editor-font-family);
+          }
+          .parse-error-ai-btn:hover:not(:disabled) { background: #4f46e5; }
+          .parse-error-ai-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+          .parse-fix-proposal {
+            margin-top: 10px;
+            padding: 10px;
+            background: var(--info-background, rgba(99,102,241,0.08));
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.45;
+          }
+          .parse-fix-proposal pre {
+            margin: 8px 0 0 0;
+            max-height: 140px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 11px;
+            opacity: 0.95;
+          }
+          .parse-fix-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+          }
+          .parse-fix-apply {
+            background: #059669;
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+          }
+          .parse-fix-apply:hover { background: #047857; }
+          .parse-fix-dismiss {
+            background: transparent;
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            padding: 8px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+          }
         `}
       </style>
 
@@ -870,6 +1033,56 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
         <div className="error-message">
           <p>YAML parsing error:</p>
           <pre>{error}</pre>
+          <div className="parse-error-ai-panel">
+            <h4>AI agent (Gemini)</h4>
+            <p className="hint">
+              Use your own API key (same as graph validation). The agent analyzes this error and proposes a fix.
+              Applying runs a second confirmation in VS Code so you can validate before the file changes.
+            </p>
+            <div className="parse-error-ai-row">
+              <input
+                className="parse-error-ai-key"
+                type="password"
+                placeholder="Gemini API key"
+                value={geminiApiKey}
+                onChange={(e) => saveApiKey(e.target.value)}
+                aria-label="Gemini API key for parse fix"
+              />
+              <button
+                type="button"
+                className="parse-error-ai-btn"
+                disabled={parseFixLoading}
+                onClick={handleRequestParseErrorFix}
+              >
+                {parseFixLoading ? 'Analyzing…' : 'Propose fix with AI'}
+              </button>
+            </div>
+            {parseFixError && (
+              <p style={{ margin: '8px 0 0', fontSize: 12, opacity: 0.95 }}>{parseFixError}</p>
+            )}
+            {parseFixProposal && (
+              <div className="parse-fix-proposal">
+                <strong>Analysis</strong>
+                <p style={{ margin: '6px 0 0' }}>{parseFixProposal.analysis}</p>
+                <strong style={{ display: 'block', marginTop: 10 }}>Planned changes (review before applying)</strong>
+                <pre>{parseFixProposal.changeSummary}</pre>
+                <strong style={{ display: 'block', marginTop: 10 }}>Proposed file preview (truncated)</strong>
+                <pre>
+                  {parseFixProposal.proposedYaml.length > 1200
+                    ? `${parseFixProposal.proposedYaml.slice(0, 1200)}…`
+                    : parseFixProposal.proposedYaml}
+                </pre>
+                <div className="parse-fix-actions">
+                  <button type="button" className="parse-fix-apply" onClick={handleApplyParseErrorFix}>
+                    Apply proposed fix…
+                  </button>
+                  <button type="button" className="parse-fix-dismiss" onClick={handleDismissParseFix}>
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

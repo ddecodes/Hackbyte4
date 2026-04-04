@@ -50,7 +50,8 @@ function parseJsonArrayFromModelText(text: string): unknown[] {
     }
     throw new Error('Gemini response was not a JSON array');
 }
-async function generateContentJson(
+/** Exported for other Gemini flows (e.g. YAML parse-error fix). */
+export async function generateContentJson(
     apiKey: string,
     model: string,
     userPrompt: string,
