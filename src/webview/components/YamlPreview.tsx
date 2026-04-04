@@ -123,10 +123,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
       } else if (message.command === 'highlightNode') {
         console.log('YamlPreview: Received highlightNode from VSCode:', message.id);
         setSelectedNodeId(message.id);
-        // Automatically switch to graph view if highlighting from editor
-        if (viewMode !== 'graph') {
-           setViewMode('graph');
-        }
+        // Do NOT automatically switch to graph view anymore, keep current view mode
       } else if (message.command === 'prepareForScreenshot') {
         // Process screenshot preparation
         console.log('YamlPreview: Preparing for screenshot');
@@ -721,6 +718,8 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
               onUpdateKey={updateYamlKey}
               isSaving={isSaving}
               saveError={saveError}
+              onHighlightNode={handleHighlightNode}
+              selectedNodeId={selectedNodeId}
             />
           ) : (
             <GraphView 

@@ -13,6 +13,8 @@ interface TableViewProps {
   onUpdateKey: (path: string[], oldKey: string, newKey: string) => void;
   isSaving: boolean;
   saveError: string | null;
+  onHighlightNode?: (path: string[]) => void;
+  selectedNodeId?: string | null;
 }
 
 interface NestedTableProps {
@@ -21,6 +23,8 @@ interface NestedTableProps {
   path: string[];
   onEditValue: (path: string[], newValue: any) => void;
   onEditKey: (path: string[], oldKey: string, newKey: string) => void;
+  onHighlightNode?: (path: string[]) => void;
+  selectedNodeId?: string | null;
 }
 
 export const TableView: React.FC<TableViewProps> = ({ 
@@ -28,7 +32,9 @@ export const TableView: React.FC<TableViewProps> = ({
   onUpdateValue, 
   onUpdateKey,
   isSaving,
-  saveError 
+  saveError,
+  onHighlightNode,
+  selectedNodeId
 }) => {
   const docs = Array.isArray(data) ? data : [data];
 
@@ -49,6 +55,8 @@ export const TableView: React.FC<TableViewProps> = ({
                 path={[index.toString()]}
                 onEditKey={onUpdateKey}
                 onEditValue={onUpdateValue}
+                onHighlightNode={onHighlightNode}
+                selectedNodeId={selectedNodeId}
               />
             </div>
           </div>
@@ -156,6 +164,36 @@ export const TableView: React.FC<TableViewProps> = ({
           }
           .bullet-item {
             margin: 4px 0;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            border-radius: 4px;
+            padding: 2px 4px;
+          }
+          .bullet-item:hover {
+            background-color: var(--format-background);
+          }
+          .bullet-item.highlighted {
+            background-color: var(--button-background);
+            color: var(--button-text) !important;
+          }
+          .table-row {
+            cursor: pointer;
+            transition: background-color 0.2s;
+          }
+          .table-row:hover {
+            background-color: var(--format-background);
+            opacity: 0.9;
+          }
+          .table-row.highlighted {
+            background-color: var(--button-background) !important;
+            color: var(--button-text) !important;
+          }
+          .table-row.highlighted .key-cell {
+            background-color: transparent !important;
+            color: var(--button-text) !important;
+          }
+          .table-row.highlighted .value-cell {
+             color: var(--button-text) !important;
           }
         `}
       </style>
@@ -163,7 +201,7 @@ export const TableView: React.FC<TableViewProps> = ({
   );
 };
 
-const NestedTable: React.FC<NestedTableProps> = ({ data, level, path, onEditValue, onEditKey }) => {
+const NestedTable: React.FC<NestedTableProps> = ({ data, level, path, onEditValue, onEditKey, onHighlightNode, selectedNodeId }) => {
   if (data === null || typeof data !== 'object') {
     return <EditableCell value={data} path={path} onSave={onEditValue} />;
   }
@@ -171,17 +209,30 @@ const NestedTable: React.FC<NestedTableProps> = ({ data, level, path, onEditValu
   if (Array.isArray(data)) {
     return (
       <ul className="bullet-list">
-        {data.map((item, index) => (
-          <li key={index} className="bullet-item">
-            <NestedTable 
-              data={item} 
-              level={level + 1} 
-              path={[...path, index.toString()]} 
-              onEditValue={onEditValue} 
-              onEditKey={onEditKey} 
-            />
-          </li>
-        ))}
+        {data.map((item, index) => {
+          const itemPath = [...path, index.toString()];
+          const isHighlighted = selectedNodeId === itemPath.join('.');
+          return (
+            <li 
+              key={index} 
+              className={`bullet-item ${isHighlighted ? 'highlighted' : ''}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onHighlightNode?.(itemPath);
+              }}
+            >
+              <NestedTable 
+                data={item} 
+                level={level + 1} 
+                path={itemPath} 
+                onEditValue={onEditValue} 
+                onEditKey={onEditKey} 
+                onHighlightNode={onHighlightNode}
+                selectedNodeId={selectedNodeId}
+              />
+            </li>
+          );
+        })}
       </ul>
     );
   }
@@ -189,26 +240,39 @@ const NestedTable: React.FC<NestedTableProps> = ({ data, level, path, onEditValu
   return (
     <table className="nested-table">
       <tbody>
-        {Object.entries(data).map(([key, value]) => (
-          <tr key={key} className="table-row">
-            <td className="key-cell">
-              <EditableKeyCell 
-                keyName={key} 
-                path={path} 
-                onSave={onEditKey} 
-              />
-            </td>
-            <td className="value-cell">
-              <NestedTable 
-                data={value} 
-                level={level + 1} 
-                path={[...path, key]} 
-                onEditValue={onEditValue} 
-                onEditKey={onEditKey} 
-              />
-            </td>
-          </tr>
-        ))}
+        {Object.entries(data).map(([key, value]) => {
+          const itemPath = [...path, key];
+          const isHighlighted = selectedNodeId === itemPath.join('.');
+          return (
+            <tr 
+              key={key} 
+              className={`table-row ${isHighlighted ? 'highlighted' : ''}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onHighlightNode?.(itemPath);
+              }}
+            >
+              <td className="key-cell">
+                <EditableKeyCell 
+                  keyName={key} 
+                  path={path} 
+                  onSave={onEditKey} 
+                />
+              </td>
+              <td className="value-cell">
+                <NestedTable 
+                  data={value} 
+                  level={level + 1} 
+                  path={itemPath} 
+                  onEditValue={onEditValue} 
+                  onEditKey={onEditKey} 
+                  onHighlightNode={onHighlightNode}
+                  selectedNodeId={selectedNodeId}
+                />
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
