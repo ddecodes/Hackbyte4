@@ -20,6 +20,9 @@ import { EntityNode } from './EntityNode';
 import { AttributePanel } from './AttributePanel';
 import { transformToLogicalGraph } from '../utils/graphUtils';
 import { idToPath } from '../utils/yamlOperations';
+import type { NodeValidationInfo } from '../types/nodeValidation';
+
+export type { NodeValidationInfo };
 
 interface GraphViewProps {
   data: any;
@@ -27,25 +30,36 @@ interface GraphViewProps {
   onUpdateStructure: (action: 'move' | 'remove', sourcePath: string[], targetPath?: string[]) => void;
   onHighlightNode?: (path: string[]) => void;
   selectedNodeId?: string | null;
+  nodeValidations?: Record<string, NodeValidationInfo>;
 }
 
 const nodeTypes = {
   entityNode: EntityNode,
 };
 
-export const GraphView: React.FC<GraphViewProps> = ({ data, onEditValue, onUpdateStructure, onHighlightNode, selectedNodeId }) => {
+export const GraphView: React.FC<GraphViewProps> = ({ data, onEditValue, onUpdateStructure, onHighlightNode, selectedNodeId, nodeValidations, }) => {
   const { nodes: initialNodes, edges: initialEdges } = useMemo(() => transformToLogicalGraph(data), [data]);
   
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [edges, setEdges] = useState<Edge[]>(initialEdges);
   const [selectedNode, setSelectedNode] = useState<any | null>(null);
 
-  // Sync nodes when data changes
+  // Sync nodes when data or Gemini validation map changes; keep user-dragged positions when ids match
   React.useEffect(() => {
     const { nodes: newNodes, edges: newEdges } = transformToLogicalGraph(data);
-    setNodes(newNodes);
+    setNodes((prev) => {
+      const posMap = new Map(prev.map((p) => [p.id, p.position]));
+      return newNodes.map((n) => ({
+        ...n,
+        position: posMap.get(n.id) ?? n.position,
+        data: {
+          ...n.data,
+          validation: nodeValidations?.[n.id],
+        },
+      }));
+    });
     setEdges(newEdges);
-  }, [data]);
+  }, [data, nodeValidations]);
   
   // Sync selectedNode when selectedNodeId changes
   React.useEffect(() => {

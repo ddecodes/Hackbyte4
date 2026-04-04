@@ -48,6 +48,16 @@
           "group": "navigation"
         }
       ]
+      },
+    "configuration": {
+      "title": "Flowjam",
+      "properties": {
+        "flowjam.geminiModel": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "Gemini model id for graph validation (API key is set in YAML Preview → AI)."
+        }
+      }
     }
   },
   "scripts": {
