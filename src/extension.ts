@@ -11,13 +11,33 @@ import MarkdownIt from 'markdown-it';
 import * as PDFDocument from 'pdfkit';
 import * as puppeteer from 'puppeteer';
 import * as YAML from 'yaml';
+import { validateGraphNodeChunk, GraphNodePayload } from './geminiGraphValidation';
 
 // Variable to hold reference to the Webview panel
 let currentPanel: vscode.WebviewPanel | undefined = undefined;
 // Reference to the currently open editor
 let currentEditor: vscode.TextEditor | undefined = undefined;
 
+let flowjamOutput: vscode.OutputChannel | undefined;
+function flowjamLog(message: string): void {
+  const stamp = new Date().toISOString();
+  const line = `[${stamp}] ${message}`;
+  console.log(`[Flowjam] ${message}`);
+  flowjamOutput?.appendLine(line);
+}
+function maskApiKey(key: string): string {
+  if (key.length <= 8) {
+    return `*** (${key.length} chars)`;
+  }
+  return `${key.slice(0, 4)}…${key.slice(-4)} (${key.length} chars)`;
+}
+
 export function activate(context: vscode.ExtensionContext) {
+  flowjamOutput = vscode.window.createOutputChannel('Flowjam');
+  context.subscriptions.push(flowjamOutput);
+  flowjamLog(
+    'Extension activated. Graph validation logs appear here. (Also in Developer Tools → Console for the Extension Host.)'
+  );
   // Log when extension is activated
   console.log('YAML Preview UI is now active');
 
@@ -464,6 +484,78 @@ async function handleWebviewMessage(panel: vscode.WebviewPanel, message: any) {
       console.error('Error in webview:', message.message);
       vscode.window.showErrorMessage('YAML Preview error: ' + message.message);
       break;
+    case 'validateGraphNodes': {
+      const requestId = Number(message.requestId);
+      if (!Number.isFinite(requestId)) {
+        flowjamLog(
+          `validateGraphNodes skipped: bad requestId ${JSON.stringify((message as any).requestId)}`
+        );
+        break;
+      }
+      const config = vscode.workspace.getConfiguration('flowjam');
+      const apiKey = String((message as { apiKey?: string }).apiKey ?? '').trim();
+      const model = String(config.get<string>('geminiModel') ?? 'gemini-2.5-flash').trim();
+      const nodes = message.nodes as GraphNodePayload[];
+      flowjamLog(
+        `validateGraphNodes requestId=${requestId} model=${model} nodeCount=${Array.isArray(nodes) ? nodes.length : 0}`
+      );
+      flowjamLog(`API key: ${apiKey ? `present ${maskApiKey(apiKey)}` : 'MISSING (set flowjam.geminiApiKey or GEMINI_API_KEY in workspace .env)'}`);
+      if (!apiKey) {
+        sendMessageToWebview(panel, {
+          command: 'graphValidationError',
+          requestId,
+          error: 'Open the AI menu in the preview and paste your Gemini API key.',
+        });
+        break;
+      }
+      if (!Array.isArray(nodes) || nodes.length === 0) {
+        flowjamLog('validateGraphNodes: no nodes to validate');
+        sendMessageToWebview(panel, { command: 'graphValidationComplete', requestId });
+        break;
+      }
+      sendMessageToWebview(panel, {
+        command: 'graphValidationStart',
+        requestId,
+        nodeIds: nodes.map((n) => n.id),
+      });
+      flowjamOutput?.show(true);
+      flowjamLog(`Sent graphValidationStart for ${nodes.length} node id(s)`);
+      const chunkSize = 14;
+      void (async () => {
+        try {
+          for (let i = 0; i < nodes.length; i += chunkSize) {
+            const chunk = nodes.slice(i, i + chunkSize);
+            flowjamLog(`Gemini chunk ${i / chunkSize + 1}: ${chunk.length} node(s), ids=${chunk.map((c) => c.id).join('; ')}`);
+            const results = await validateGraphNodeChunk(apiKey, model, chunk, flowjamLog);
+            flowjamLog(`Chunk parsed → ${results.length} result row(s)`);
+            for (const r of results) {
+              const shortMsg = r.message.replace(/\s+/g, ' ').slice(0, 200);
+              flowjamLog(`  node "${r.nodeId}" → ${r.status}: ${shortMsg}`);
+              sendMessageToWebview(panel, {
+                command: 'nodeValidation',
+                requestId,
+                nodeId: r.nodeId,
+                status: r.status,
+                message: r.message,
+              });
+              await new Promise((resolve) => setTimeout(resolve, 40));
+            }
+          }
+          flowjamLog('graphValidationComplete (all chunks OK)');
+          sendMessageToWebview(panel, { command: 'graphValidationComplete', requestId });
+        } catch (e) {
+          const err = String(e);
+          flowjamLog(`Gemini graph validation FAILED: ${err}`);
+          console.error('Gemini graph validation failed:', e);
+          sendMessageToWebview(panel, {
+            command: 'graphValidationError',
+            requestId,
+            error: err,
+          });
+        }
+      })();
+      break;
+    }
   }
 }
 

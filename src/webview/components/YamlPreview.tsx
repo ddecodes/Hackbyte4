@@ -2,10 +2,11 @@ import * as React from 'react';
 import { useState, useEffect, useRef } from 'react';
 import * as jsYaml from 'js-yaml';
 import { TableView } from './TableView';
-import { GraphView } from './GraphView';
+import { GraphView, NodeValidationInfo } from './GraphView';
 import { YamlDetector, YamlFormat } from '../../utils/yaml-detector';
 import { ThemeProvider } from '../utils/themeContext';
 import * as yamlOps from '../utils/yamlOperations';
+import { transformToLogicalGraph, getValueAtPath, trimValidationSnippet } from '../utils/graphUtils';
 
 // Property type definition
 interface YamlPreviewProps {
@@ -44,6 +45,24 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
   // Highlighted node (from code editor selection)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
+  // --- Gemini Validation State ---
+  const [nodeValidations, setNodeValidations] = useState<Record<string, NodeValidationInfo>>({});
+  const [isAiValidating, setIsAiValidating] = useState<boolean>(false);
+  const [geminiApiKey, setGeminiApiKey] = useState<string>('');
+  const [isAiEnabled, setIsAiEnabled] = useState<boolean>(false);
+  const validationRequestIdRef = useRef<number>(0);
+
+  // Initialize API key from local storage
+  useEffect(() => {
+    const saved = localStorage.getItem('flowjam.geminiApiKey');
+    if (saved) setGeminiApiKey(saved);
+  }, []);
+
+  const saveApiKey = (key: string) => {
+    setGeminiApiKey(key);
+    localStorage.setItem('flowjam.geminiApiKey', key);
+  };
+
   // Convert YAML to JSON
   const parseYaml = (content: string) => {
     try {
@@ -59,9 +78,9 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
         console.error('JS-YAML load error:', loadErr);
         throw loadErr;
       }
-      
+
       setJsonData(docs);
-      
+
       // Detect YAML format from the first document if available
       if (docs.length > 0 && typeof docs[0] === 'object') {
         const format = YamlDetector.detectFormat(docs[0]);
@@ -92,7 +111,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     const handleVSCodeMessage = (event: MessageEvent) => {
       const message = event.data;
       console.log('YamlPreview: Received message from vscode:', message);
-      
+
       if (message.command === 'updateContent') {
         if (message.content && message.content !== lastContentRef.current) {
           console.log('YamlPreview: Updating content from VSCode message');
@@ -105,11 +124,11 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
         console.log('YamlPreview: Save complete notification received:', message.success);
         if (message.success) {
           setCommunicationStatus('Saved successfully');
-          setIsSaving(false); 
+          setIsSaving(false);
           setTimeout(() => setCommunicationStatus(null), 2000);
         } else {
           setCommunicationStatus(`Error: ${message.error || 'Failed to save'}`);
-          setIsSaving(false); 
+          setIsSaving(false);
           setTimeout(() => setCommunicationStatus(null), 5000);
         }
       } else if (message.command === 'exportComplete') {
@@ -137,12 +156,12 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
       } else if (message.command === 'captureHtmlSnapshot') {
         // Capture and send HTML snapshot
         console.log('YamlPreview: Capturing HTML snapshot');
-        
+
         // Hide export menu
         setShowExportMenu(false);
         // Hide notification messages
         setCommunicationStatus(null);
-        
+
         // Wait a moment to capture snapshot (to allow UI updates to complete)
         setTimeout(() => {
           try {
@@ -154,7 +173,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
               if (!contentElement) {
                 throw new Error('Content element not found');
               }
-              
+
               // Get style information
               const styles = Array.from(document.styleSheets)
                 .filter(sheet => {
@@ -171,10 +190,10 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
                     .join('\n');
                 })
                 .join('\n');
-              
+
               // Get HTML content (excluding edit-related UI elements)
               const html = contentElement.innerHTML;
-              
+
               // Send snapshot information to VSCode
               vscodeApi.postMessage({
                 command: 'htmlSnapshot',
@@ -198,10 +217,10 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
                     .join('\n');
                 })
                 .join('\n');
-              
+
               // Get table HTML
               const html = tableElement.outerHTML;
-              
+
               // Send snapshot information to VSCode
               vscodeApi.postMessage({
                 command: 'htmlSnapshot',
@@ -210,7 +229,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
                 tableOnly: true
               });
             }
-            
+
             console.log('YamlPreview: HTML snapshot sent to VSCode');
           } catch (err) {
             console.error('Error capturing HTML snapshot:', err);
@@ -220,6 +239,43 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
             });
           }
         }, 200); // Set 200ms delay
+      } else if (message.command === 'graphValidationStart') {
+        const rid = Number(message.requestId);
+        if (rid === validationRequestIdRef.current) {
+          setIsAiValidating(true);
+          const ids = message.nodeIds as string[];
+          setNodeValidations((prev) => {
+            const next = { ...prev };
+            for (const id of ids) {
+              next[id] = { status: 'pending', message: 'Gemini is reviewing this fragment...' };
+            }
+            return next;
+          });
+        }
+      } else if (message.command === 'nodeValidation') {
+        const rid = Number(message.requestId);
+        if (rid === validationRequestIdRef.current) {
+          setNodeValidations((prev) => ({
+            ...prev,
+            [message.nodeId]: { status: message.status, message: message.message },
+          }));
+        }
+      } else if (message.command === 'graphValidationComplete') {
+        const rid = Number(message.requestId);
+        if (rid === validationRequestIdRef.current) {
+          setIsAiValidating(false);
+          setCommunicationStatus('AI Validation Complete');
+          setTimeout(() => setCommunicationStatus(null), 3000);
+        }
+      } else if (message.command === 'graphValidationError') {
+        const rid = Number(message.requestId);
+        if (rid === validationRequestIdRef.current) {
+          setIsAiValidating(false);
+          const err = String(message.error);
+          setCommunicationStatus(`AI Error: ${err}`);
+          setNodeValidations({});
+          setTimeout(() => setCommunicationStatus(null), 6000);
+        }
       }
     };
 
@@ -239,7 +295,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     const handleContentUpdate = (event: CustomEvent) => {
       const detail = event.detail;
       console.log('YamlPreview: Received content update event:', detail);
-      
+
       if (detail.command === 'updateYaml' && detail.content) {
         // Send updated YAML back to VS Code
         vscodeApi.postMessage({
@@ -252,7 +308,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
 
     // Add custom event listener
     window.addEventListener('yaml-editor-update', handleContentUpdate as EventListener);
-    
+
     return () => {
       window.removeEventListener('message', handleVSCodeMessage);
       window.removeEventListener('yaml-editor-update', handleContentUpdate as EventListener);
@@ -264,14 +320,14 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     try {
       setIsSaving(true);
       setSaveError(null);
-      
+
       const docs: any[] = [];
       jsYaml.loadAll(yamlContent, (doc) => { if (doc !== null) docs.push(doc); });
-      
+
       // First element of path is document index
       const docIndex = parseInt(path[0]);
       const actualPath = path.slice(1);
-      
+
       if (actualPath.length === 0) {
         const targetDoc = docs[docIndex];
         const newObj: any = {};
@@ -292,15 +348,15 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
         });
         current[parentKey] = newObj;
       }
-      
+
 
       const updatedYaml = docs.map(d => jsYaml.dump(d, { lineWidth: -1, noRefs: true, sortKeys: false })).join('---\n');
-      
+
       // OPTIMISTIC UPDATE: Update local state immediately
       setYamlContent(updatedYaml);
       setJsonData(docs);
       lastContentRef.current = updatedYaml;
-      
+
       vscodeApi.postMessage({ command: 'updateYaml', content: updatedYaml });
     } catch (err) {
       console.error('Failed to update key:', err);
@@ -313,29 +369,29 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     try {
       setIsSaving(true);
       setSaveError(null);
-      
+
       const docs: any[] = [];
       jsYaml.loadAll(yamlContent, (doc) => { if (doc !== null) docs.push(doc); });
-      
+
       const docIndex = parseInt(path[0]);
       const actualPath = path.slice(1);
-      
+
       let current: any = docs[docIndex];
       for (let i = 0; i < actualPath.length - 1; i++) {
         if (current[actualPath[i]] === undefined) current[actualPath[i]] = {};
         current = current[actualPath[i]];
       }
-      
+
       const lastKey = actualPath[actualPath.length - 1];
       if (lastKey !== undefined) current[lastKey] = newValue;
-      
+
       const updatedYaml = docs.map(d => jsYaml.dump(d, { lineWidth: -1, noRefs: true, sortKeys: false })).join('---\n');
-      
+
       // OPTIMISTIC UPDATE: Update local state immediately
       setYamlContent(updatedYaml);
       setJsonData(docs);
       lastContentRef.current = updatedYaml;
-      
+
       vscodeApi.postMessage({ command: 'updateYaml', content: updatedYaml });
     } catch (err) {
       console.error('Failed to update value:', err);
@@ -348,13 +404,13 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     try {
       setIsSaving(true);
       setSaveError(null);
-      
+
       const docs: any[] = [];
       jsYaml.loadAll(yamlContent, (doc) => { if (doc !== null) docs.push(doc); });
-      
+
       const sourceDocIndex = parseInt(sourcePath[0]);
       const sourceActualPath = sourcePath.slice(1);
-      
+
       let targetDocIndex = targetPath ? parseInt(targetPath[0]) : sourceDocIndex;
       const targetActualPath = targetPath ? targetPath.slice(1) : undefined;
 
@@ -369,12 +425,12 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
       }
 
       const updatedYaml = docs.map(d => jsYaml.dump(d, { lineWidth: -1, noRefs: true, sortKeys: false })).join('---\n');
-      
+
       // OPTIMISTIC UPDATE: Update local state immediately
       setYamlContent(updatedYaml);
       setJsonData(docs);
       lastContentRef.current = updatedYaml;
-      
+
       vscodeApi.postMessage({ command: 'updateYaml', content: updatedYaml });
     } catch (err) {
       console.error('Failed to update structure:', err);
@@ -394,7 +450,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     };
 
     document.addEventListener('click', handleClickOutside);
-    
+
     return () => {
       document.removeEventListener('click', handleClickOutside);
     };
@@ -403,14 +459,14 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
   // Export in specified format
   const exportAs = (format: ExportFormat) => {
     console.log(`YamlPreview: Exporting as ${format}`);
-    
+
     if (!jsonData) {
       console.error('Cannot export: No valid data');
       setCommunicationStatus('Error: No valid data to export');
       setTimeout(() => setCommunicationStatus(null), 3000);
       return;
     }
-    
+
     // Send export message to VS Code extension
     vscodeApi.postMessage({
       command: 'exportAs',
@@ -418,7 +474,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
       content: jsonData,
       yamlContent: yamlContent
     });
-    
+
     setCommunicationStatus(`Exporting as ${format.toUpperCase()}...`);
     setShowExportMenu(false); // Close menu
   };
@@ -428,10 +484,34 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     setShowExportMenu(!showExportMenu);
   };
 
+  const handleRunGraphValidation = () => {
+    if (!jsonData) return;
+    const rid = ++validationRequestIdRef.current;
+
+    // We only validate the "entity" nodes in the graph view.
+    const { nodes } = transformToLogicalGraph(jsonData);
+    const payloads = nodes.map((n) => {
+      const val = getValueAtPath(jsonData, n.data.path);
+      const snippet = trimValidationSnippet(JSON.stringify(val, null, 2));
+      return {
+        id: n.id,
+        label: n.data.label,
+        snippet,
+      };
+    });
+
+    vscodeApi.postMessage({
+      command: 'validateGraphNodes',
+      requestId: rid,
+      apiKey: geminiApiKey,
+      nodes: payloads,
+    });
+  };
+
   const handleHighlightNode = (path: string[]) => {
     vscodeApi.postMessage({
-        command: 'highlightPath',
-        path: path
+      command: 'highlightPath',
+      path: path
     });
   };
 
@@ -513,7 +593,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
           .export-button svg {
             margin-right: 5px;
             width: 14px;
-            height: 14px;
+            height: 25px;
           }
           .export-button:hover {
             background-color: var(--button-hover);
@@ -526,7 +606,7 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
           .export-menu {
             position: absolute;
             top: 45px;
-            left: 10px;
+            left: 0;
             background-color: var(--panel-background);
             border: 1px solid var(--border-color);
             border-radius: 4px;
@@ -612,11 +692,13 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
 
           .view-switcher {
             display: flex;
+            justify-content: space-between;
+            align-items: center;
             background-color: var(--panel-background);
             border: 1px solid var(--border-color);
             border-radius: 6px;
             padding: 2px;
-            margin-left: 10px;
+            width: 100%;
           }
           .view-switcher-button {
             background: none;
@@ -649,92 +731,255 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
             box-shadow: 0 2px 8px var(--shadow-color);
             z-index: 1000;
           }
+
+          .ai-menu-container {
+            position: relative;
+            display: inline-block;
+          }
+
+          /* Modern Toggle Switch inside view-switcher */
+          .switcher-divider {
+            width: 1px;
+            background-color: var(--border-color);
+            margin: 4px 10px;
+            align-self: stretch;
+          }
+          .ai-toggle-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            user-select: none;
+            padding: 0 8px;
+            color: var(--text-color);
+            opacity: 0.8;
+            transition: opacity 0.2s;
+          }
+          .ai-toggle-label:hover { opacity: 1; }
+          .switch {
+            position: relative;
+            display: inline-block;
+            width: 30px;
+            height: 16px;
+          }
+          .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+          }
+          .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--border-color);
+            transition: .4s;
+            border-radius: 34px;
+          }
+          .slider:before {
+            position: absolute;
+            content: "";
+            height: 12px;
+            width: 12px;
+            left: 2px;
+            bottom: 2px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+          }
+          input:checked + .slider {
+            background-color: #6366f1;
+          }
+          input:checked + .slider:before {
+            transform: translateX(14px);
+          }
+
+          .ai-config-form {
+            position: absolute;
+            top: calc(100% + 10px);
+            right: 0;
+            background-color: var(--panel-background);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            width: 280px;
+            box-shadow: 0 4px 20px var(--shadow-color);
+            z-index: 150;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            animation: slideInDown 0.2s ease;
+          }
+          @keyframes slideInDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          .ai-config-form h4 {
+            margin: 0;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-color);
+          }
+          .ai-config-form p {
+            margin: 0;
+            font-size: 11px;
+            opacity: 0.7;
+            line-height: 1.4;
+          }
+          .ai-config-input {
+            background: var(--background-color);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            outline: none;
+          }
+          .ai-config-input:focus {
+            border-color: #6366f1;
+          }
+          .ai-form-actions {
+            display: flex;
+            gap: 8px;
+          }
+          .ai-run-btn {
+            flex: 1;
+            background-color: #6366f1;
+            color: white;
+            border: none;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+          }
+          .ai-run-btn:hover { background-color: #4f46e5; }
+          .ai-run-btn:disabled { opacity: 0.5; }
         `}
       </style>
-      
+
       {error && (
         <div className="error-message">
           <p>YAML parsing error:</p>
           <pre>{error}</pre>
         </div>
       )}
-      
+
       {communicationStatus && (
         <div className={`communication-status ${communicationStatus.includes('Error') ? 'error' : 'success'}`}>
           {communicationStatus}
         </div>
       )}
 
-      {/* Editing guide */}
-      <div className="editing-guide">
-        <span className="info-icon">ℹ️</span> Double-click on any key or value to edit
-      </div>
-
       {/* YAML format information display */}
       {!error && jsonData && (
         <div className="yaml-format-info" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center' }}>
-            <span className="yaml-format-icon">📄</span>
-            <span className="yaml-format-name">
-              {yamlFormat === YamlFormat.Generic ? 'Generic YAML' : yamlFormat}
-            </span>
-          </div>
-          
+
           <div className="view-switcher">
-            <button 
-              className={`view-switcher-button ${viewMode === 'table' ? 'active' : ''}`}
-              onClick={() => setViewMode('table')}
-            >
-              Table View
-            </button>
-            <button 
-              className={`view-switcher-button ${viewMode === 'graph' ? 'active' : ''}`}
-              onClick={() => setViewMode('graph')}
-            >
-              Graph View
-            </button>
+            <div className="view-switcher-left" style={{ display: 'flex' }}>
+              <button
+                className={`view-switcher-button ${viewMode === 'table' ? 'active' : ''}`}
+                onClick={() => setViewMode('table')}
+              >
+                Table View
+              </button>
+              <button
+                className={`view-switcher-button ${viewMode === 'graph' ? 'active' : ''}`}
+                onClick={() => setViewMode('graph')}
+              >
+                Graph View
+              </button>
+            </div>
+
+            <label className="ai-toggle-label">
+              <div className="switch">
+                <input
+                  type="checkbox"
+                  checked={isAiEnabled}
+                  onChange={(e) => setIsAiEnabled(e.target.checked)}
+                />
+                <span className="slider"></span>
+              </div>
+              <span>AI Validation</span>
+            </label>
           </div>
         </div>
       )}
-      
-      {/* Export button and menu */}
-      <div className="action-buttons">
-        <button 
-          className="export-button" 
-          onClick={toggleExportMenu}
-          title="Export"
-        >
-          Export ▾
-        </button>
-        
-        {showExportMenu && (
-          <div className="export-menu">
-            <div className="export-menu-item" onClick={() => exportAs('json')}>
-              Save as JSON
+
+      {/* AI Config Popover */}
+      {!error && isAiEnabled && (
+        <div className="ai-menu-container" style={{ position: 'absolute', right: '40px', top: '100px', zIndex: 100 }}>
+          <div className="ai-config-form">
+            <h4>✨ Gemini Validation</h4>
+            <p>Paste your API key below to enable intelligent graph validation.</p>
+            <input
+              className="ai-config-input"
+              type="password"
+              placeholder="Gemini API Key..."
+              value={geminiApiKey}
+              onChange={(e) => saveApiKey(e.target.value)}
+            />
+            <div className="ai-form-actions">
+              <button
+                className="ai-run-btn"
+                onClick={handleRunGraphValidation}
+                disabled={isAiValidating}
+              >
+                {isAiValidating ? '✨ Validating...' : '✨ Run Validation'}
+              </button>
             </div>
-            <div className="export-menu-item" onClick={() => exportAs('markdown')}>
-              Save as Markdown
-            </div>
-            <div className="export-menu-item" onClick={() => exportAs('xml')}>
-              Save as XML
-            </div>
-            <div className="export-menu-item" onClick={() => exportAs('html')}>
-              Save as HTML
-            </div>
-            <div className="export-menu-item" onClick={() => exportAs('png')}>
-              Save as PNG
-            </div>
+            {/* {!geminiApiKey && <p style={{ color: 'var(--error-text)', fontSize: '10px' }}>⚠️ Key required to continue.</p>} */}
           </div>
-        )}
+        </div>
+      )}
+
+      {/* Export Tool */}
+      <div className="action-buttons">
+
+        <div className="export-menu-container">
+          <button
+            className="export-button"
+            onClick={toggleExportMenu}
+            title="Export"
+          >
+            Export ▾
+          </button>
+
+          {showExportMenu && (
+            <div className="export-menu">
+              <div className="export-menu-item" onClick={() => exportAs('json')}>
+                Save as JSON
+              </div>
+              <div className="export-menu-item" onClick={() => exportAs('markdown')}>
+                Save as Markdown
+              </div>
+              <div className="export-menu-item" onClick={() => exportAs('xml')}>
+                Save as XML
+              </div>
+              <div className="export-menu-item" onClick={() => exportAs('html')}>
+                Save as HTML
+              </div>
+              <div className="export-menu-item" onClick={() => exportAs('png')}>
+                Save as PNG
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-      
+
       {/* JSON display or table display */}
       {!error && jsonData && (
         <div className="content-view">
           {viewMode === 'table' ? (
-            <TableView 
-              data={jsonData} 
-              vscodeApi={vscodeApi} 
+            <TableView
+              data={jsonData}
+              vscodeApi={vscodeApi}
               onUpdateValue={updateYamlValue}
               onUpdateKey={updateYamlKey}
               isSaving={isSaving}
@@ -743,12 +988,13 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
               selectedNodeId={selectedNodeId}
             />
           ) : (
-            <GraphView 
-              data={jsonData} 
+            <GraphView
+              data={jsonData}
               onEditValue={updateYamlValue}
               onUpdateStructure={updateYamlStructure}
               onHighlightNode={handleHighlightNode}
               selectedNodeId={selectedNodeId}
+              nodeValidations={nodeValidations}
             />
           )}
         </div>
