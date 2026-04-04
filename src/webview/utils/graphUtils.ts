@@ -6,42 +6,6 @@ export interface GraphData {
   edges: Edge[];
 }
 
-/**
- * Resolve the JSON value at a graph node path (first segment = document index; then object keys or `[i]` for arrays).
- */
-export function getValueAtPath(data: any, path: string[]): any {
-  const docs = Array.isArray(data) ? data : [data];
-  if (path.length === 0) {
-    return undefined;
-  }
-  const docIndex = parseInt(path[0], 10);
-  if (Number.isNaN(docIndex) || docIndex < 0 || docIndex >= docs.length) {
-    return undefined;
-  }
-  let cur: any = docs[docIndex];
-  for (let i = 1; i < path.length; i++) {
-    const seg = path[i];
-    if (cur == null) {
-      return undefined;
-    }
-    const idxMatch = /^\[(\d+)\]$/.exec(seg);
-    if (idxMatch && Array.isArray(cur)) {
-      cur = cur[parseInt(idxMatch[1], 10)];
-    } else {
-      cur = cur[seg];
-    }
-  }
-  return cur;
-}
-
-/** Truncate JSON snippets sent to Gemini from the webview. */
-export function trimValidationSnippet(snippet: string, maxLen: number = 2000): string {
-  if (snippet.length <= maxLen) {
-    return snippet;
-  }
-  return snippet.slice(0, maxLen) + '…';
-}
-
 const nodeWidth = 220;
 const nodeHeight = 100;
 
@@ -56,21 +20,21 @@ export function transformToLogicalGraph(data: any): GraphData {
 
   const docs = Array.isArray(data) ? data : [data];
 
-  function traverse(obj: any, parentId: string | null = null, path: string[] = [], key: string | null = null) {
+  function traverse(obj: any, parentId: string | null = null, path: string[] = [], entityKey: string | null = null) {
     const currentId = path.join('.');
     if (visited.has(currentId)) return;
     visited.add(currentId);
 
     const attributes: Record<string, any> = {};
-    const subEntities: Array<{ k: string, v: any }> = [];
+    const subEntities: Array<{k: string, v: any, label?: string}> = [];
 
     if (obj !== null && typeof obj === 'object') {
       if (Array.isArray(obj)) {
         obj.forEach((item, index) => {
           if (item !== null && typeof item === 'object') {
-            subEntities.push({ k: `[${index}]`, v: item });
+             subEntities.push({ k: index.toString(), v: item, label: `[${index}]` });
           } else {
-            attributes[`item_${index}`] = item;
+             attributes[index.toString()] = item;
           }
         });
       } else {
@@ -83,11 +47,11 @@ export function transformToLogicalGraph(data: any): GraphData {
         });
       }
     } else {
-      attributes['value'] = obj;
+        attributes['value'] = obj;
     }
 
     // Determine a friendly label for the document root
-    let label = key;
+    let label = entityKey;
     if (path.length === 1) { // It's a document root
       label = obj?.metadata?.name || (obj?.kind ? `[${obj.kind}]` : `Doc ${path[0]}`);
     } else if (path.length === 0) {
@@ -96,8 +60,8 @@ export function transformToLogicalGraph(data: any): GraphData {
 
     nodes.push({
       id: currentId,
-      data: {
-        label: label || 'Entity',
+      data: { 
+        label: label || 'Entity', 
         attributes,
         path,
         type: Array.isArray(obj) ? 'collection' : 'entity',
@@ -124,8 +88,8 @@ export function transformToLogicalGraph(data: any): GraphData {
       });
     }
 
-    subEntities.forEach(({ k, v }) => {
-      traverse(v, currentId, [...path, k], k);
+    subEntities.forEach(({k, v, label}) => {
+      traverse(v, currentId, [...path, k], label || k);
     });
   }
 
