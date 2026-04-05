@@ -33,6 +33,9 @@ function maskApiKey(key: string): string {
   return `${key.slice(0, 4)}…${key.slice(-4)} (${key.length} chars)`;
 }
 
+/** Request IDs for which the user turned AI off — stop Gemini chunk loop early. */
+const cancelledGraphValidationRequestIds = new Set<number>();
+
 /** Best-effort: jump to the line mentioned in a js-yaml / YAMLException message. */
 function revealYamlErrorInEditor(editor: vscode.TextEditor | undefined, errorMessage: string): void {
   if (!editor) {
@@ -657,6 +660,14 @@ async function handleWebviewMessage(panel: vscode.WebviewPanel, message: any) {
       })();
       break;
     }
+    case 'cancelGraphValidation': {
+      const cancelId = Number((message as { requestId?: unknown }).requestId);
+      if (Number.isFinite(cancelId)) {
+        cancelledGraphValidationRequestIds.add(cancelId);
+        flowjamLog(`cancelGraphValidation requestId=${cancelId}`);
+      }
+      break;
+    }
     case 'validateGraphNodes': {
       const requestId = Number(message.requestId);
       if (!Number.isFinite(requestId)) {
@@ -697,9 +708,19 @@ async function handleWebviewMessage(panel: vscode.WebviewPanel, message: any) {
       void (async () => {
         try {
           for (let i = 0; i < nodes.length; i += chunkSize) {
+            if (cancelledGraphValidationRequestIds.has(requestId)) {
+              cancelledGraphValidationRequestIds.delete(requestId);
+              flowjamLog(`graph validation aborted (cancelled) requestId=${requestId}`);
+              return;
+            }
             const chunk = nodes.slice(i, i + chunkSize);
             flowjamLog(`Gemini chunk ${i / chunkSize + 1}: ${chunk.length} node(s), ids=${chunk.map((c) => c.id).join('; ')}`);
             const results = await validateGraphNodeChunk(apiKey, model, chunk, flowjamLog);
+            if (cancelledGraphValidationRequestIds.has(requestId)) {
+              cancelledGraphValidationRequestIds.delete(requestId);
+              flowjamLog(`graph validation aborted after chunk (cancelled) requestId=${requestId}`);
+              return;
+            }
             flowjamLog(`Chunk parsed → ${results.length} result row(s)`);
             for (const r of results) {
               const shortMsg = r.message.replace(/\s+/g, ' ').slice(0, 200);
@@ -713,6 +734,11 @@ async function handleWebviewMessage(panel: vscode.WebviewPanel, message: any) {
               });
               await new Promise((resolve) => setTimeout(resolve, 40));
             }
+          }
+          if (cancelledGraphValidationRequestIds.has(requestId)) {
+            cancelledGraphValidationRequestIds.delete(requestId);
+            flowjamLog(`graph validation not completing (cancelled) requestId=${requestId}`);
+            return;
           }
           flowjamLog('graphValidationComplete (all chunks OK)');
           sendMessageToWebview(panel, { command: 'graphValidationComplete', requestId });

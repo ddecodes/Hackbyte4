@@ -51,7 +51,10 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
   const [isAiValidating, setIsAiValidating] = useState<boolean>(false);
   const [geminiApiKey, setGeminiApiKey] = useState<string>('');
   const [isAiEnabled, setIsAiEnabled] = useState<boolean>(false);
+  /** API key + Run Validation popover (toggle can stay on after dismiss). */
+  const [showAiConfigForm, setShowAiConfigForm] = useState<boolean>(false);
   const validationRequestIdRef = useRef<number>(0);
+  const aiConfigFormShellRef = useRef<HTMLDivElement | null>(null);
 
   // --- AI parse-error fix (YAML invalid: no graph/table) ---
   const parseFixRequestIdRef = useRef<number>(0);
@@ -488,6 +491,22 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     };
   }, [showExportMenu]);
 
+  // Close AI config popover on mousedown outside the form shell (toggle stays on until user turns it off)
+  useEffect(() => {
+    if (!showAiConfigForm) {
+      return;
+    }
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (aiConfigFormShellRef.current?.contains(target)) {
+        return;
+      }
+      setShowAiConfigForm(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [showAiConfigForm]);
+
   // Export in specified format
   const exportAs = (format: ExportFormat) => {
     console.log(`YamlPreview: Exporting as ${format}`);
@@ -516,8 +535,23 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
     setShowExportMenu(!showExportMenu);
   };
 
+  const handleAiToggle = (enabled: boolean) => {
+    if (enabled) {
+      setIsAiEnabled(true);
+      setShowAiConfigForm(true);
+      return;
+    }
+    const ridToCancel = validationRequestIdRef.current;
+    validationRequestIdRef.current += 1;
+    setIsAiValidating(false);
+    setNodeValidations({});
+    setIsAiEnabled(false);
+    setShowAiConfigForm(false);
+    vscodeApi.postMessage({ command: 'cancelGraphValidation', requestId: ridToCancel });
+  };
+
   const handleRunGraphValidation = () => {
-    if (!jsonData) return;
+    if (!jsonData || !isAiEnabled) return;
     const rid = ++validationRequestIdRef.current;
 
     // We only validate the "entity" nodes in the graph view.
@@ -774,14 +808,45 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
             --graph-accent: #7C3AED;
           }
 
-          .view-switcher {
+          .yaml-format-info {
             display: flex;
             justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            max-width: none;
+            box-sizing: border-box;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            gap: 8px;
+            /* Reserve top-right corner for Mascot (absolute in container; do not change Mascot.tsx) */
+            padding-right: 88px;
+          }
+          .view-switcher {
+            display: inline-flex;
+            justify-content: flex-start;
             align-items: center;
             background-color: var(--panel-background);
             border: 1px solid var(--border-color);
             border-radius: 6px;
             padding: 2px;
+            width: fit-content;
+            max-width: 100%;
+          }
+          .ai-toolbar-section {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0;
+            flex-shrink: 0;
+          }
+          .ai-toolbar-section .ai-toggle-label {
+            background-color: var(--panel-background);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 4px 10px;
+            opacity: 1;
+          }
+          .content-view {
             width: 100%;
           }
           .view-switcher-button {
@@ -898,12 +963,37 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
             gap: 12px;
             animation: slideInDown 0.2s ease;
           }
+          .ai-config-form-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+          }
+          .ai-config-form-header h4 {
+            margin: 0;
+          }
+          .ai-config-close-btn {
+            flex-shrink: 0;
+            border: none;
+            background: transparent;
+            color: var(--text-color);
+            font-size: 20px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0 2px;
+            margin: -4px 0 0;
+            opacity: 0.65;
+            border-radius: 4px;
+          }
+          .ai-config-close-btn:hover {
+            opacity: 1;
+            background: var(--format-background);
+          }
           @keyframes slideInDown {
             from { opacity: 0; transform: translateY(-10px); }
             to { opacity: 1; transform: translateY(0); }
           }
           .ai-config-form h4 {
-            margin: 0;
             font-size: 13px;
             display: flex;
             align-items: center;
@@ -1100,10 +1190,9 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
         </div>
       )}
 
-      {/* YAML format information display */}
+      {/* Panel toolbar: view switcher (left) + AI controls (right), same row */}
       {!error && jsonData && (
-        <div className="yaml-format-info" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-
+        <div className="yaml-format-info">
           <div className="view-switcher">
             <div className="view-switcher-left" style={{ display: 'flex' }}>
               <button
@@ -1119,45 +1208,56 @@ const YamlPreviewInner: React.FC<YamlPreviewProps> = ({ initialContent, vscodeAp
                 Graph View
               </button>
             </div>
-
+          </div>
+          <div className="ai-toolbar-section">
             <label className="ai-toggle-label">
               <div className="switch">
                 <input
                   type="checkbox"
                   checked={isAiEnabled}
-                  onChange={(e) => setIsAiEnabled(e.target.checked)}
+                  onChange={(e) => handleAiToggle(e.target.checked)}
                 />
                 <span className="slider"></span>
               </div>
-              <span>AI Validation</span>
+              <span> AI </span>
             </label>
-          </div>
-        </div>
-      )}
-
-      {/* AI Config Popover */}
-      {!error && isAiEnabled && (
-        <div className="ai-menu-container" style={{ position: 'absolute', right: '0px', top: '100px', zIndex: 100 }}>
-          <div className="ai-config-form">
-            <h4>✨ Gemini Validation</h4>
-            <p>Paste your API key below to enable intelligent graph validation.</p>
-            <input
-              className="ai-config-input"
-              type="password"
-              placeholder="Gemini API Key..."
-              value={geminiApiKey}
-              onChange={(e) => saveApiKey(e.target.value)}
-            />
-            <div className="ai-form-actions">
-              <button
-                className="ai-run-btn"
-                onClick={handleRunGraphValidation}
-                disabled={isAiValidating}
+            {isAiEnabled && showAiConfigForm && (
+              <div
+                ref={aiConfigFormShellRef}
+                className="ai-menu-container ai-config-form-shell"
               >
-                {isAiValidating ? '✨ Validating...' : '✨ Run Validation'}
-              </button>
-            </div>
-            {/* {!geminiApiKey && <p style={{ color: 'var(--error-text)', fontSize: '10px' }}>⚠️ Key required to continue.</p>} */}
+                <div className="ai-config-form">
+                  <div className="ai-config-form-header">
+                    <h4>✨ Gemini Validation</h4>
+                    <button
+                      type="button"
+                      className="ai-config-close-btn"
+                      aria-label="Close"
+                      onClick={() => setShowAiConfigForm(false)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <p>Paste your API key below to enable intelligent graph validation.</p>
+                  <input
+                    className="ai-config-input"
+                    type="password"
+                    placeholder="Gemini API Key..."
+                    value={geminiApiKey}
+                    onChange={(e) => saveApiKey(e.target.value)}
+                  />
+                  <div className="ai-form-actions">
+                    <button
+                      className="ai-run-btn"
+                      onClick={handleRunGraphValidation}
+                      disabled={isAiValidating}
+                    >
+                      {isAiValidating ? '✨ Validating...' : '✨ Run Validation'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
