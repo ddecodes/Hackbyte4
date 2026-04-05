@@ -1,8 +1,8 @@
 import * as React from 'react';
-import { useCallback, useMemo, useState } from 'react';
-import ReactFlow, { 
-  Background, 
-  Controls, 
+import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
+import ReactFlow, {
+  Background,
+  Controls,
   ConnectionLineType,
   Node,
   Edge,
@@ -12,7 +12,9 @@ import ReactFlow, {
   applyEdgeChanges,
   Connection,
   addEdge,
-  updateEdge
+  updateEdge,
+  useReactFlow,
+  ReactFlowInstance,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 
@@ -37,8 +39,41 @@ const nodeTypes = {
   entityNode: EntityNode,
 };
 
+/** Re-run fitView when layout from YAML changes (not on node drag). */
+function FitViewOnGraphChange({ layoutKey }: { layoutKey: string }) {
+  const { fitView } = useReactFlow();
+  useLayoutEffect(() => {
+    let alive = true;
+    const t = window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        if (!alive) {
+          return;
+        }
+        fitView({
+          padding: 0.2,
+          minZoom: 0.02,
+          maxZoom: 1.75,
+          duration: 220,
+          includeHiddenNodes: false,
+        });
+      });
+    }, 48);
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+    };
+  }, [layoutKey, fitView]);
+  return null;
+}
+
 export const GraphView: React.FC<GraphViewProps> = ({ data, onEditValue, onUpdateStructure, onHighlightNode, selectedNodeId, nodeValidations, }) => {
-  const { nodes: initialNodes, edges: initialEdges } = useMemo(() => transformToLogicalGraph(data), [data]);
+  const graphLayout = useMemo(() => transformToLogicalGraph(data), [data]);
+  const { nodes: initialNodes, edges: initialEdges } = graphLayout;
+  const fitViewLayoutKey = useMemo(
+    () =>
+      `${graphLayout.nodes.length}:${graphLayout.edges.length}:${graphLayout.nodes.map((n) => n.id).join(',')}`,
+    [graphLayout]
+  );
   
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [edges, setEdges] = useState<Edge[]>(initialEdges);
@@ -132,6 +167,30 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onEditValue, onUpdat
     setSelectedNode(null);
   }, []);
 
+  const onFlowInit = useCallback((instance: ReactFlowInstance) => {
+    window.requestAnimationFrame(() => {
+      instance.fitView({
+        padding: 0.2,
+        minZoom: 0.02,
+        maxZoom: 1.75,
+        duration: 0,
+      });
+    });
+  }, []);
+
+  const defaultEdgeOptions = useMemo(
+    () => ({
+      type: 'smoothstep' as const,
+      pathOptions: { borderRadius: 28, offset: 2 },
+      style: {
+        strokeWidth: 2.5,
+        strokeLinecap: 'round' as const,
+        strokeLinejoin: 'round' as const,
+      },
+    }),
+    []
+  );
+
   return (
     <div className="graph-view-wrapper">
       <div className="flow-container">
@@ -145,10 +204,16 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onEditValue, onUpdat
           onEdgesDelete={onEdgesDelete}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
+          onInit={onFlowInit}
           nodeTypes={nodeTypes}
           connectionLineType={ConnectionLineType.SmoothStep}
-          fitView
+          defaultEdgeOptions={defaultEdgeOptions}
+          connectionLineStyle={{ stroke: 'var(--graph-accent)', strokeWidth: 2.5, strokeLinecap: 'round' }}
+          minZoom={0.02}
+          maxZoom={4}
+          proOptions={{ hideAttribution: true }}
         >
+          <FitViewOnGraphChange layoutKey={fitViewLayoutKey} />
           <Background color="var(--border-color)" gap={20} />
           <Controls />
         </ReactFlow>
@@ -182,16 +247,57 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onEditValue, onUpdat
           background: var(--button-background);
         }
         .react-flow__controls {
-          background: var(--panel-background);
-          border: 1px solid var(--border-color);
+          background: linear-gradient(
+            165deg,
+            rgba(168, 85, 247, 0.22) 0%,
+            rgba(124, 58, 237, 0.14) 45%,
+            rgba(17, 24, 39, 0.55) 100%
+          ) !important;
+          border: 1px solid var(--graph-accent) !important;
+          border-radius: 12px !important;
+          overflow: hidden;
+          box-shadow:
+            0 2px 12px rgba(124, 58, 237, 0.35),
+            inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+        }
+        [data-theme='light'] .react-flow__controls {
+          background: linear-gradient(
+            165deg,
+            rgba(168, 85, 247, 0.35) 0%,
+            rgba(196, 181, 253, 0.45) 100%
+          ) !important;
+          box-shadow: 0 2px 12px rgba(124, 58, 237, 0.25) !important;
         }
         .react-flow__controls-button {
-          border-bottom: 1px solid var(--border-color);
-          fill: var(--text-color);
+          background: transparent !important;
+          border: none !important;
+          border-bottom: 1px solid rgba(124, 58, 237, 0.45) !important;
+          border-radius: 0 !important;
+        }
+        .react-flow__controls-button:last-child {
+          border-bottom: none !important;
+        }
+        .react-flow__controls-button:hover {
+          background: rgba(17, 24, 39, 0.35) !important;
+        }
+        [data-theme='light'] .react-flow__controls-button:hover {
+          background: rgba(124, 58, 237, 0.25) !important;
+        }
+        .react-flow__controls-button svg,
+        .react-flow__controls-button svg path {
+          fill: #ffffffff !important;
+          stroke: #909090ff !important;
+        }
+        [data-theme='light'] .react-flow__controls-button svg,
+        [data-theme='light'] .react-flow__controls-button svg path {
+          fill: #111827 !important;
+          stroke: #111827 !important;
         }
         .react-flow__edge-path {
           stroke: var(--graph-accent);
-          stroke-width: 2;
+          stroke-width: 2.5;
+          stroke-linecap: round;
+          stroke-linejoin: round;
         }
       `}</style>
     </div>
